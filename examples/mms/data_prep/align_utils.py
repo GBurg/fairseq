@@ -1,10 +1,12 @@
 import re 
 import os
+import time
 import torch
 import tempfile
 import math
 from dataclasses import dataclass
 from torchaudio.models import wav2vec2_model
+import subprocess
 
 # iso codes with specialized rules in uroman
 special_isos_uroman = "ara, bel, bul, deu, ell, eng, fas, grc, ell, eng, heb, kaz, kir, lav, lit, mkd, mkd2, oss, pnt, pus, rus, srp, srp2, tur, uig, ukr, yid".split(",")
@@ -17,30 +19,52 @@ def normalize_uroman(text):
     return text.strip()
 
 
-def get_uroman_tokens(norm_transcripts, uroman_root_dir, iso = None):
-    tf = tempfile.NamedTemporaryFile()  
-    tf2 = tempfile.NamedTemporaryFile()  
-    with open(tf.name, "w") as f:
-        for t in norm_transcripts:
-            f.write(t + "\n")
-
+def get_uroman_tokens(norm_transcripts, uroman_root_dir, iso=None):
     assert os.path.exists(f"{uroman_root_dir}/uroman.pl"), "uroman not found"
-    cmd = f"perl {uroman_root_dir}/uroman.pl"
+    cmd = ["perl", f"{uroman_root_dir}/uroman.pl"]
     if iso in special_isos_uroman:
-        cmd += f" -l {iso} "
-    cmd +=  f" < {tf.name} > {tf2.name}" 
-    os.system(cmd)
-    outtexts = []
-    with open(tf2.name) as f:
-        for line in f:
+        cmd.extend(["-l", iso])
+
+    # Create temp files inside the 'with' statement to ensure they are cleaned up
+    with tempfile.NamedTemporaryFile(mode='w+', delete=False, encoding='utf-8') as tf, \
+         tempfile.NamedTemporaryFile(mode='w+', delete=False) as tf2:
+
+        for t in norm_transcripts:
+            tf.write(t + "\n")
+
+        # Reset file pointer to the beginning
+        tf.seek(0)
+
+        # Run the Perl command with input and output redirected to the temp files
+        subprocess.run(cmd, stdin=tf, stdout=tf2, check=True)
+
+        # Reset file pointer for the output file
+        tf2.seek(0)
+
+        outtexts = []
+        for line in tf2:
             line = " ".join(line.strip())
-            line =  re.sub(r"\s+", " ", line).strip()
+            line = re.sub(r"\s+", " ", line).strip()
             outtexts.append(line)
-    assert len(outtexts) == len(norm_transcripts)
-    uromans = []
-    for ot in outtexts:
-        uromans.append(normalize_uroman(ot))
+
+        # print(outtexts)  # add this
+        # print(norm_transcripts)  # add this
+        assert len(outtexts) == len(norm_transcripts)
+        uromans = []
+        for ot in outtexts:
+            uromans.append(normalize_uroman(ot))
+
+        # Close the files explicitly before unlinking
+        tf.close()
+        tf2.close()
+
+
+    # print(tf.name, tf2.name)
+    os.unlink(tf.name)  # The temp file is removed manually
+    os.unlink(tf2.name)  # The temp file is removed manually
+
     return uromans
+
 
 
 
@@ -77,7 +101,7 @@ def time_to_frame(time):
 
 
 def load_model_dict():
-    model_path_name = "/tmp/ctc_alignment_mling_uroman_model.pt"
+    model_path_name = "./tmp/ctc_alignment_mling_uroman_model.pt"
 
     print("Downloading model and dictionary...")
     if os.path.exists(model_path_name):
@@ -119,7 +143,7 @@ def load_model_dict():
     model.load_state_dict(state_dict)
     model.eval()
 
-    dict_path_name = "/tmp/ctc_alignment_mling_uroman_model.dict"
+    dict_path_name = "./tmp/ctc_alignment_mling_uroman_model.dict"
     if os.path.exists(dict_path_name):
         print("Dictionary path already exists. Skipping downloading....")
     else:
